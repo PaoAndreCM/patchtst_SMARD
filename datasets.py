@@ -110,11 +110,11 @@ class Dataset_Custom(Dataset):
 class Dataset_SMARD(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='S', data_path='SMARD_converted.csv',
-                 target='OT', scale=True, gap=56, 
+                 target='OT', scale=True, offset=56, window_split=96,
                  split_mode='ratio', ratio_train=0.7, ratio_val=0.2,
                  train_start_date="2015-01-01 00:00:00", train_stop_date="2020-12-31 23:45:00",
                  val_start_date="2021-01-01 00:00:00", val_stop_date="2022-12-31 23:45:00",
-                 test_start_date="2023-01-01 00:00:00", test_stop_date="2023-12-31 23:45:00"):
+                 test_start_date="2023-01-01 00:00:00", test_stop_date="2023-12-31 22:45:00"):
         # size [seq_len, label_len, pred_len]
         self.seq_len = size[0]
         self.label_len = size[1]
@@ -127,10 +127,11 @@ class Dataset_SMARD(Dataset):
         self.features = features
         self.target = target
         self.scale = scale
+        self.window_split = window_split
 
         self.root_path = root_path
         self.data_path = data_path
-        self.gap = gap
+        self.gap = offset
 
         self.split_mode = split_mode
         self.ratio_train = ratio_train
@@ -163,12 +164,12 @@ class Dataset_SMARD(Dataset):
         border1s, border2s = None, None 
         
         if self.split_mode == 'fixed':
-            idx_train_start = df_raw.index[df_raw['date'] == self.train_start_date][0]
-            idx_train_stop = df_raw.index[df_raw['date'] == self.train_stop_date][0]
-            idx_val_start = df_raw.index[df_raw['date'] == self.val_start_date][0]
-            idx_val_stop = df_raw.index[df_raw['date'] == self.val_stop_date][0]
-            idx_test_start = df_raw.index[df_raw['date'] == self.test_start_date][0]
-            idx_test_end = df_raw.index[df_raw['date'] == self.test_stop_date][0]
+            idx_train_start = df_raw.index[df_raw['date'].astype(str).str[:19] == self.train_start_date][0]
+            idx_train_stop = df_raw.index[df_raw['date'].astype(str).str[:19] == self.train_stop_date][0]
+            idx_val_start = df_raw.index[df_raw['date'].astype(str).str[:19] == self.val_start_date][0]
+            idx_val_stop = df_raw.index[df_raw['date'].astype(str).str[:19] == self.val_stop_date][0]
+            idx_test_start = df_raw.index[df_raw['date'].astype(str).str[:19] == self.test_start_date][0]
+            idx_test_end = df_raw.index[df_raw['date'].astype(str).str[:19] == self.test_stop_date][0]
             border1s = [idx_train_start, idx_val_start, idx_test_start]
             border2s = [idx_train_stop, idx_val_stop, idx_test_end]
         else:  # ratio-based split
@@ -198,7 +199,8 @@ class Dataset_SMARD(Dataset):
         self.data_y = data[border1:border2]
 
     def __getitem__(self, index):
-        s_begin = index
+        i = index * self.window_split
+        s_begin = i
         s_end = s_begin + self.seq_len
         r_begin = s_end + self.gap
         r_end = r_begin + self.pred_len
@@ -209,82 +211,7 @@ class Dataset_SMARD(Dataset):
         return seq_x, seq_y
 
     def __len__(self):
-        return len(self.data_x) - self.seq_len - self.pred_len - self.gap + 1
+        return (len(self.data_x) - self.seq_len - self.pred_len - self.gap) // self.window_split + 1
 
     def inverse_transform(self, data):
         return self.scaler.inverse_transform(data)
-    
-class Dataset_SMARD_Raw(Dataset):
-    def __init__(self, root_path, flag='train', size=None,
-                features='S', data_path='SMARD_converted.csv',
-                target='OT', gap=56):
-        # size [seq_len, label_len, pred_len]
-        self.seq_len = size[0]
-        self.label_len = size[1]
-        self.pred_len = size[2]
-
-        assert flag in ['train', 'test', 'val']
-        type_map = {'train': 0, 'val': 1, 'test': 2}
-        self.set_type = type_map[flag]
-
-        self.features = features
-        self.target = target
-        self.root_path = root_path
-        self.data_path = data_path
-        self.gap = gap
-
-        self.__read_data__()
-
-    def __read_data__(self):
-        df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
-
-        # Arrange columns: ['date', ...(other features)..., target]
-        cols = list(df_raw.columns)
-        cols.remove(self.target)
-        cols.remove('date')
-        df_raw = df_raw[['date'] + cols + [self.target]]
-
-        # Split boundaries
-        num_train = int(len(df_raw) * 0.7)
-        num_test = int(len(df_raw) * 0.2)
-        num_vali = len(df_raw) - num_train - num_test
-
-        border1s = [0, num_train - self.seq_len, len(df_raw) - num_test - self.seq_len]
-        border2s = [num_train, num_train + num_vali, len(df_raw)]
-        border1 = border1s[self.set_type]
-        border2 = border2s[self.set_type]
-
-        # Select features
-        if self.features in ['M', 'MS']:
-            cols_data = df_raw.columns[1:]
-            df_data = df_raw[cols_data]
-        else:  # 'S'
-            df_data = df_raw[[self.target]]
-
-        # No scaling — keep data as-is
-        data = df_data.values
-
-        # Extract date info
-        df_stamp = df_raw[['date']][border1:border2]
-        df_stamp['date'] = pd.to_datetime(df_stamp.date)
-
-        self.data_x = data[border1:border2]
-        self.data_y = data[border1:border2]
-
-    def __getitem__(self, index):
-        # Ensure we stay within range
-        if index + self.seq_len + self.pred_len + self.gap > len(self.data_x):
-            index = len(self.data_x) - self.seq_len - self.pred_len - self.gap
-
-        s_begin = index
-        s_end = s_begin + self.seq_len
-        r_begin = s_end + self.gap
-        r_end = r_begin + self.pred_len
-
-        seq_x = self.data_x[s_begin:s_end]
-        seq_y = self.data_y[r_begin:r_end]
-
-        return seq_x, seq_y
-
-    def __len__(self):
-        return len(self.data_x) - self.seq_len - self.pred_len + 1
